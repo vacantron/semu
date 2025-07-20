@@ -79,5 +79,10 @@
             interrupts = <5>;
         };
 #endif
+
+        ais0@4800000 {
+            compatible = "ais,generic-mmio-device";
+            reg = <0x4800000 0x200>;
+        };
     };
 };

@@ -113,6 +113,9 @@ static void emu_update_vsnd_interrupts(vm_t *vm)
 }
 #endif
 
+extern uint32_t systemc_dram_read(uint32_t);
+extern void systemc_dram_write(uint32_t, uint32_t);
+
 static void mem_load(hart_t *hart,
                      uint32_t addr,
                      uint8_t width,
@@ -121,7 +124,10 @@ static void mem_load(hart_t *hart,
     emu_state_t *data = PRIV(hart);
     /* RAM at 0x00000000 + RAM_SIZE */
     if (addr < RAM_SIZE) {
-        ram_read(hart, data->ram, addr, width, value);
+        if (addr >= 0x4800000 && addr < 0x4800000 + 0x200)
+            *value = systemc_dram_read(addr);
+        else
+            ram_read(hart, data->ram, addr, width, value);
         return;
     }
 
@@ -175,6 +181,9 @@ static void mem_load(hart_t *hart,
             emu_update_vsnd_interrupts(hart->vm);
             return;
 #endif
+        case 0x48:
+            *value = systemc_dram_read(addr);
+            return;
         }
     }
     vm_set_exception(hart, RV_EXC_LOAD_FAULT, hart->exc_val);
@@ -188,7 +197,10 @@ static void mem_store(hart_t *hart,
     emu_state_t *data = PRIV(hart);
     /* RAM at 0x00000000 + RAM_SIZE */
     if (addr < RAM_SIZE) {
-        ram_write(hart, data->ram, addr, width, value);
+        if (addr >= 0x4800000 && addr < 0x4800000 + 0x200)
+            systemc_dram_write(addr, value);
+        else
+            ram_write(hart, data->ram, addr, width, value);
         return;
     }
 
@@ -243,6 +255,9 @@ static void mem_store(hart_t *hart,
             emu_update_vsnd_interrupts(hart->vm);
             return;
 #endif
+        case 0x48:
+            systemc_dram_write(addr, value);
+            return;
         }
     }
     vm_set_exception(hart, RV_EXC_STORE_FAULT, hart->exc_val);
@@ -596,7 +611,7 @@ static void handle_options(int argc,
         vm_init(hart);                            \
     } while (0)
 
-static int semu_init(emu_state_t *emu, int argc, char **argv)
+int semu_init(emu_state_t *emu, int argc, char **argv)
 {
     char *kernel_file;
     char *dtb_file;
@@ -755,7 +770,7 @@ static int semu_step(emu_state_t *emu)
     return 0;
 }
 
-static int semu_run(emu_state_t *emu)
+int semu_run(emu_state_t *emu)
 {
     int ret;
 
@@ -873,7 +888,7 @@ static void semu_set_cpu(void *args, int cpuid)
     emu->curr_cpuid = cpuid;
 }
 
-static int semu_run_debug(emu_state_t *emu)
+static __attribute__((unused)) int semu_run_debug(emu_state_t *emu)
 {
     vm_t *vm = &emu->vm;
 
@@ -912,18 +927,4 @@ static int semu_run_debug(emu_state_t *emu)
     gdbstub_close(&gdbstub);
 
     return 0;
-}
-
-int main(int argc, char **argv)
-{
-    int ret;
-    emu_state_t emu;
-    ret = semu_init(&emu, argc, argv);
-    if (ret)
-        return ret;
-
-    if (emu.debug)
-        return semu_run_debug(&emu);
-
-    return semu_run(&emu);
 }

@@ -14,7 +14,7 @@ OBJS_EXTRA :=
 # command line option
 OPTS :=
 
-LDFLAGS :=
+LDFLAGS := -L$(SYSTEMC_PATH)/lib-linux64 -lsystemc
 
 # virtio-blk
 ENABLE_VIRTIOBLK ?= 1
@@ -167,8 +167,9 @@ $(OBJS): $(MINISLIRP_LIB)
 endif
 
 $(BIN): $(OBJS)
+	$(Q)$(MAKE) -C hw/
 	$(VECHO) "  LD\t$@\n"
-	$(Q)$(CC) -o $@ $^ $(LDFLAGS)
+	$(Q)$(CXX) -o $@ $^ hw/master.o hw/slave.o hw/glue.o hw/main.o $(LDFLAGS)
 
 %.o: %.c
 	$(VECHO) "  CC\t$@\n"
@@ -225,6 +226,7 @@ clean:
 	$(Q)$(RM) $(BIN) $(OBJS) $(deps)
 	$(Q)$(MAKE) -C mini-gdbstub clean
 	$(Q)$(MAKE) -C minislirp/src clean
+	$(Q)$(MAKE) -C hw/ clean
 
 distclean: clean
 	$(Q)$(RM) riscv-harts.dtsi
