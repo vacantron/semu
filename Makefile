@@ -44,7 +44,7 @@ ifeq ($(call has, VIRTIOBLK), 1)
 endif
 
 # virtio-rng
-ENABLE_VIRTIORNG ?= 1
+ENABLE_VIRTIORNG ?= 0
 $(call set-feature, VIRTIORNG)
 ifeq ($(call has, VIRTIORNG), 1)
     OBJS_EXTRA += virtio-rng.o
@@ -52,7 +52,7 @@ endif
 
 NETDEV ?= tap
 # virtio-net
-ENABLE_VIRTIONET ?= 1
+ENABLE_VIRTIONET ?= 0
 ifneq ($(UNAME_S),Linux)
     ENABLE_VIRTIONET := 0
 endif
@@ -64,7 +64,7 @@ ifeq ($(call has, VIRTIONET), 1)
 endif
 
 # virtio-snd
-ENABLE_VIRTIOSND ?= 1
+ENABLE_VIRTIOSND ?= 0
 ifneq ($(UNAME_S),$(filter $(UNAME_S),Linux Darwin))
     ENABLE_VIRTIOSND := 0
 endif
@@ -155,6 +155,8 @@ OBJS := \
 	uart.o \
 	main.o \
 	aclint.o \
+    globals.o \
+    device.o \
 	$(OBJS_EXTRA)
 
 objs := $(foreach obj,$(OBJS),$(BUILD_DIR)/$(obj))

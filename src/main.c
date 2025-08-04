@@ -11,6 +11,7 @@
 
 #include "device.h"
 #include "mini-gdbstub/include/gdbstub.h"
+#include "plic.h"
 #include "riscv.h"
 #include "riscv_private.h"
 #define PRIV(x) ((emu_state_t *) x->priv)
@@ -38,17 +39,6 @@ static uint32_t *mem_page_table(const hart_t *hart, uint32_t ppn)
     return NULL;
 }
 
-static void emu_update_uart_interrupts(vm_t *vm)
-{
-    emu_state_t *data = PRIV(vm->hart[0]);
-    u8250_update_interrupts(&data->uart);
-    if (data->uart.pending_ints)
-        data->plic.active |= IRQ_UART_BIT;
-    else
-        data->plic.active &= ~IRQ_UART_BIT;
-    plic_update_interrupts(vm, &data->plic);
-}
-
 #if SEMU_HAS(VIRTIONET)
 static void emu_update_vnet_interrupts(vm_t *vm)
 {
@@ -57,18 +47,6 @@ static void emu_update_vnet_interrupts(vm_t *vm)
         data->plic.active |= IRQ_VNET_BIT;
     else
         data->plic.active &= ~IRQ_VNET_BIT;
-    plic_update_interrupts(vm, &data->plic);
-}
-#endif
-
-#if SEMU_HAS(VIRTIOBLK)
-static void emu_update_vblk_interrupts(vm_t *vm)
-{
-    emu_state_t *data = PRIV(vm->hart[0]);
-    if (data->vblk.InterruptStatus)
-        data->plic.active |= IRQ_VBLK_BIT;
-    else
-        data->plic.active &= ~IRQ_VBLK_BIT;
     plic_update_interrupts(vm, &data->plic);
 }
 #endif
@@ -126,27 +104,15 @@ static void mem_load(hart_t *hart,
     }
 
     if ((addr >> 28) == 0xF) { /* MMIO at 0xF_______ */
+        if (devices_load(hart, addr, width, value))
+            return;
+
         /* 256 regions of 1MiB */
         switch ((addr >> 20) & MASK(8)) {
-        case 0x0:
-        case 0x2: /* PLIC (0 - 0x3F) */
-            plic_read(hart, &data->plic, addr & 0x3FFFFFF, width, value);
-            plic_update_interrupts(hart->vm, &data->plic);
-            return;
-        case 0x40: /* UART */
-            u8250_read(hart, &data->uart, addr & 0xFFFFF, width, value);
-            emu_update_uart_interrupts(hart->vm);
-            return;
 #if SEMU_HAS(VIRTIONET)
         case 0x41: /* virtio-net */
             virtio_net_read(hart, &data->vnet, addr & 0xFFFFF, width, value);
             emu_update_vnet_interrupts(hart->vm);
-            return;
-#endif
-#if SEMU_HAS(VIRTIOBLK)
-        case 0x42: /* virtio-blk */
-            virtio_blk_read(hart, &data->vblk, addr & 0xFFFFF, width, value);
-            emu_update_vblk_interrupts(hart->vm);
             return;
 #endif
         case 0x43: /* mtimer */
@@ -193,27 +159,15 @@ static void mem_store(hart_t *hart,
     }
 
     if ((addr >> 28) == 0xF) { /* MMIO at 0xF_______ */
+        if (devices_store(hart, addr, width, value))
+            return;
+
         /* 256 regions of 1MiB */
         switch ((addr >> 20) & MASK(8)) {
-        case 0x0:
-        case 0x2: /* PLIC (0 - 0x3F) */
-            plic_write(hart, &data->plic, addr & 0x3FFFFFF, width, value);
-            plic_update_interrupts(hart->vm, &data->plic);
-            return;
-        case 0x40: /* UART */
-            u8250_write(hart, &data->uart, addr & 0xFFFFF, width, value);
-            emu_update_uart_interrupts(hart->vm);
-            return;
 #if SEMU_HAS(VIRTIONET)
         case 0x41: /* virtio-net */
             virtio_net_write(hart, &data->vnet, addr & 0xFFFFF, width, value);
             emu_update_vnet_interrupts(hart->vm);
-            return;
-#endif
-#if SEMU_HAS(VIRTIOBLK)
-        case 0x42: /* virtio-blk */
-            virtio_blk_write(hart, &data->vblk, addr & 0xFFFFF, width, value);
-            emu_update_vblk_interrupts(hart->vm);
             return;
 #endif
         case 0x43: /* mtimer */
@@ -601,13 +555,13 @@ static int semu_init(emu_state_t *emu, int argc, char **argv)
     char *kernel_file;
     char *dtb_file;
     char *initrd_file;
-    char *disk_file;
     char *netdev;
     int hart_count = 1;
     bool debug = false;
     vm_t *vm = &emu->vm;
+    g_emu = emu;
     handle_options(argc, argv, &kernel_file, &dtb_file, &initrd_file,
-                   &disk_file, &netdev, &hart_count, &debug);
+                   &g_disk_file, &netdev, &hart_count, &debug);
 
     /* Initialize the emulator */
     memset(emu, 0, sizeof(*emu));
@@ -673,10 +627,6 @@ static int semu_init(emu_state_t *emu, int argc, char **argv)
         fprintf(stderr, "No virtio-net functioned\n");
     emu->vnet.ram = emu->ram;
 #endif
-#if SEMU_HAS(VIRTIOBLK)
-    emu->vblk.ram = emu->ram;
-    emu->disk = virtio_blk_init(&(emu->vblk), disk_file);
-#endif
 #if SEMU_HAS(VIRTIORNG)
     emu->vrng.ram = emu->ram;
     virtio_rng_init();
@@ -695,6 +645,8 @@ static int semu_init(emu_state_t *emu, int argc, char **argv)
     emu->peripheral_update_ctr = 0;
     emu->debug = debug;
 
+    devices_init();
+
     return 0;
 }
 
@@ -707,21 +659,14 @@ static int semu_step(emu_state_t *emu)
      */
     for (uint32_t i = 0; i < vm->n_hart; i++) {
         if (emu->peripheral_update_ctr-- == 0) {
-            emu->peripheral_update_ctr = 64;
+            emu->peripheral_update_ctr = (1 << 12);
 
-            u8250_check_ready(&emu->uart);
-            if (emu->uart.in_ready)
-                emu_update_uart_interrupts(vm);
+            devices_step(vm->hart[i]);
 
 #if SEMU_HAS(VIRTIONET)
             virtio_net_refresh_queue(&emu->vnet);
             if (emu->vnet.InterruptStatus)
                 emu_update_vnet_interrupts(vm);
-#endif
-
-#if SEMU_HAS(VIRTIOBLK)
-            if (emu->vblk.InterruptStatus)
-                emu_update_vblk_interrupts(vm);
 #endif
 
 #if SEMU_HAS(VIRTIOSND)
