@@ -1,6 +1,10 @@
+#include <stdlib.h>
+
 #include "device.h"
 #include "riscv.h"
 #include "riscv_private.h"
+
+#include "plic.h"
 
 /* Make PLIC as simple as possible: 32 interrupts, no priority */
 
@@ -124,3 +128,125 @@ void plic_write(hart_t *vm,
         return;
     }
 }
+
+static void _init(device_t *dev)
+{
+    dev->instance = (void *) &plic;
+}
+
+static void _read(device_t *dev,
+                  hart_t *hart UNUSED,
+                  uint32_t addr UNUSED,
+                  uint32_t width UNUSED,
+                  uint32_t *value UNUSED);
+
+static void _update(device_t *dev, hart_t *hart)
+{
+    plic_t *plic = (plic_t *) dev->instance;
+    if (plic->lock)
+        goto update_hart_ip;
+
+    for (uint32_t i = 0; i < MAX_PLIC_DEVICE; i++) {
+        plic->gateway_ip[i] = plic->source_ip[i];
+    }
+
+update_hart_ip:
+    uint32_t value = 0;
+    _read(dev, hart, 0x1000, 4, &value);
+
+    if (value)
+        hart->sip |= RV_INT_SEI_BIT;
+    else
+        hart->sip &= ~(RV_INT_SEI_BIT);
+}
+
+static void _read(device_t *dev,
+                  hart_t *hart UNUSED,
+                  uint32_t addr UNUSED,
+                  uint32_t width UNUSED,
+                  uint32_t *value UNUSED)
+{
+    plic_t *plic = (plic_t *) dev->instance;
+    addr &= 0x3ffffff;
+
+    /* claim */
+    if (addr == (0x200004 + 0x1000 * 0)) {
+        /* get highest priority, clear source ip, lock gateway */
+        uint32_t ip = 0;
+        for (unsigned int i = 0; i < MAX_PLIC_DEVICE; i++) {
+            if (plic->gateway_ip[i]) {
+                ip = i;
+                break;
+            }
+        }
+
+        if (!ip) {
+            *value = 0;
+            return;
+        }
+
+        plic->source_ip[ip] = false;
+        plic->gateway_ip[ip] = false;
+        plic->claim = ip;
+        plic->lock = true;
+
+        *value = ip;
+        return;
+    }
+
+    if (addr == (0x200000)) {
+        *value = 0;
+        return;
+    }
+
+    if (addr == 0x2000) {
+        *value = plic->enable;
+        return;
+    }
+
+    if (addr == 0x1000) {
+        uint32_t val = 0;
+        for (uint32_t i = 0; i < MAX_PLIC_DEVICE; i++) {
+            if (!plic->gateway_ip[i])
+                continue;
+            val |= ((plic->gateway_ip[i] ? 1 : 0) << i);
+        }
+        *value = val;
+        return;
+    }
+}
+
+static void _write(device_t *dev UNUSED,
+                   hart_t *hart UNUSED,
+                   uint32_t addr UNUSED,
+                   uint32_t width UNUSED,
+                   uint32_t value UNUSED)
+{
+    plic_t *plic = (plic_t *) dev->instance;
+    addr &= 0x3ffffff;
+
+    /* completion */
+    if (addr == (0x200004 + 0x1000 * 0)) {
+        if (plic->claim != value)
+            return;
+        plic->lock = false;
+        return;
+    }
+
+    if (addr == 0x2000) {
+        plic->enable = (value & ~1u);
+        return;
+    }
+}
+
+/* TODO: remove hardcoded address, use libfdt */
+static device_t dev = {.name = "plic0",
+                       .init = _init,
+                       .step = _update,
+                       .read = _read,
+                       .write = _write,
+                       .addr_lo = 0,
+                       .addr_hi = 0x4000000};
+
+/* TODO: refine priority */
+register_device(plic0, 116, &dev);

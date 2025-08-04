@@ -389,3 +389,51 @@ typedef struct {
     bool is_interrupted;
     int curr_cpuid;
 } emu_state_t;
+
+struct device;
+
+typedef void (*device_read_handler_t)(struct device *dev UNUSED,
+                                      hart_t *hart UNUSED,
+                                      uint32_t addr UNUSED,
+                                      uint32_t width UNUSED,
+                                      uint32_t *value UNUSED);
+
+typedef void (*device_write_handler_t)(struct device *dev UNUSED,
+                                       hart_t *hart UNUSED,
+                                       uint32_t addr UNUSED,
+                                       uint32_t width UNUSED,
+                                       uint32_t value UNUSED);
+
+#define MAX_DEVICE_NAME_LEHGTH 64
+
+typedef struct device {
+    char name[MAX_DEVICE_NAME_LEHGTH];
+    void *instance;
+    bool *intr_notifier;
+    void (*init)(struct device *dev);
+    void (*step)(struct device *dev, hart_t *hart);
+    device_read_handler_t read;
+    device_write_handler_t write;
+    uint32_t addr_lo, addr_hi;
+} device_t;
+
+#include "globals.h"
+
+#define register_device(name, order, dev)                             \
+    void __attribute__((constructor(order))) register_device_##name() \
+    {                                                                 \
+        devices[device_idx++] = (dev);                                \
+    }
+
+void devices_init();
+void devices_step(hart_t *hart UNUSED);
+bool devices_load(hart_t *hart UNUSED,
+                  uint32_t addr UNUSED,
+                  uint32_t width UNUSED,
+                  uint32_t *value UNUSED);
+bool devices_store(hart_t *hart UNUSED,
+                   uint32_t addr UNUSED,
+                   uint32_t width UNUSED,
+                   uint32_t value UNUSED);
+
+bool device_addr_in_range(device_t *dev, uint32_t addr);

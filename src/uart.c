@@ -223,3 +223,107 @@ void u8250_write(hart_t *vm,
         return;
     }
 }
+
+static void _init(device_t *dev)
+{
+    dev->instance = calloc(1, sizeof(u8250_state_t));
+
+    u8250_state_t *u8250 = (u8250_state_t *) dev->instance;
+    u8250->in_fd = 0;
+    u8250->out_fd = 1;
+}
+
+static void _update(device_t *dev, hart_t *hart UNUSED)
+{
+    u8250_state_t *uart = (u8250_state_t *) dev->instance;
+
+    if (uart->in_ready)
+        return;
+
+    struct pollfd pfd = {uart->in_fd, POLLIN, 0};
+    poll(&pfd, 1, 0);
+    if (pfd.revents & POLLIN)
+        uart->in_ready = true;
+
+    /* Some interrupts are level-generated. */
+    /* TODO: does it also generate an LSR change interrupt? */
+    if (uart->in_ready)
+        uart->pending_ints |= 1;
+    else
+        uart->pending_ints &= ~1;
+
+    /* Prevent generating any disabled interrupts in the first place */
+    uart->pending_ints &= uart->ier;
+
+    /* Update current interrupt (higher bits -> more priority) */
+    if (uart->pending_ints)
+        uart->current_int = ilog2(uart->pending_ints);
+
+    if (uart->pending_ints)
+        *dev->intr_notifier = true;
+    else
+        *dev->intr_notifier = false;
+}
+
+static void _read(device_t *dev,
+                  hart_t *hart,
+                  uint32_t addr,
+                  uint32_t width,
+                  uint32_t *value)
+{
+    u8250_state_t *uart = (u8250_state_t *) dev->instance;
+    uint8_t u8value;
+
+    switch (width) {
+    case RV_MEM_LBU:
+        u8250_reg_read(uart, addr & 0xfffff, &u8value);
+        *value = (uint32_t) u8value;
+        break;
+    case RV_MEM_LB:
+        u8250_reg_read(uart, addr & 0xfffff, &u8value);
+        *value = (uint32_t) (int8_t) u8value;
+        break;
+    case RV_MEM_LW:
+    case RV_MEM_LHU:
+    case RV_MEM_LH:
+        vm_set_exception(hart, RV_EXC_LOAD_MISALIGN, hart->exc_val);
+        return;
+    default:
+        vm_set_exception(hart, RV_EXC_ILLEGAL_INSN, 0);
+        return;
+    }
+}
+
+static void _write(device_t *dev,
+                   hart_t *hart,
+                   uint32_t addr,
+                   uint32_t width,
+                   uint32_t value)
+{
+    u8250_state_t *uart = (u8250_state_t *) dev->instance;
+
+    switch (width) {
+    case RV_MEM_SB:
+        u8250_reg_write(uart, addr & 0xfffff, value);
+        break;
+    case RV_MEM_SW:
+    case RV_MEM_SH:
+        vm_set_exception(hart, RV_EXC_STORE_MISALIGN, hart->exc_val);
+        return;
+    default:
+        vm_set_exception(hart, RV_EXC_ILLEGAL_INSN, 0);
+        return;
+    }
+}
+
+/* TODO: remove hardcoded address, use libfdt */
+static device_t dev = {.name = "uart0",
+                       .init = _init,
+                       .step = _update,
+                       .read = _read,
+                       .write = _write,
+                       .addr_lo = 0x4000000,
+                       .addr_hi = 0x4100000};
+
+/* TODO: refine priority */
+register_device(uart0, 101, &dev);
